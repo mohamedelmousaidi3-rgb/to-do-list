@@ -21,3 +21,7 @@
   font-size: 20px;
   cursor: pointer;
 }
+
+/* Seven-day completion histogram */
+.histogramCard{margin-top:16px}.histogramHint{font-size:11px;color:#7b8490}.histogram{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;height:150px;margin-top:22px}.histogramDay{display:flex;align-items:center;flex-direction:column;gap:7px;min-width:0}.histogramValue{font-size:10px;color:#687281;font-weight:800}.histogramTrack{height:105px;width:min(100%,34px);background:#f0f3f6;border-radius:8px 8px 4px 4px;display:flex;align-items:flex-end;overflow:hidden}.histogramTrack span{display:block;width:100%;min-height:3px;border-radius:7px 7px 3px 3px;transition:height .25s ease}.histogramTrack .full{background:#18a957}.histogramTrack .partial{background:#1671d9}.histogramTrack .emptyBar{background:#dce2e8}.histogramLabel{font-size:10px;color:#7b8490}@media(max-width:700px){.histogramCard{margin-top:14px}.histogram{gap:7px}.histogramHint{display:none}.histogramTrack{height:90px}}
+.fieldHint{font-size:11px;color:#7b8490;margin:-6px 0 2px}
