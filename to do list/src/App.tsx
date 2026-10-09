@@ -1,3 +1,259 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CalendarDays, Check, CheckCircle2, ChevronLeft, ChevronRight,
+  Circle, LogIn, LogOut, Menu, Plus, Search, Trash2, UserRound, X
+} from "lucide-react";
+import { isSupabaseConfigured, supabase } from "./lib";
+
+type Task = {
+  id: string;
+  user_id: string;
+  title: string;
+  notes: string | null;
+  task_date: string;
+  completed: boolean;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type Completion = {
+  id: string;
+  task_id: string;
+  user_id: string;
+  completion_date: string;
+  completed: boolean;
+  completed_at: string | null;
+};
+
+type Profile = {
+  id: string;
+  full_name: string | null;
+  phone: string | null;
+};
+
+const pad = (n: number) => String(n).padStart(2, "0");
+const dateKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const todayKey = dateKey(new Date());
+
+function App() {
+  const [session, setSession] = useState<any>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [completions, setCompletions] = useState<Completion[]>([]);
+  const [selectedDate, setSelectedDate] = useState(todayKey);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"login"|"signup">("login");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<Task | null>(null);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [mobileMenu, setMobileMenu] = useState(false);
+  const [appError, setAppError] = useState("");
+  const channelRef = useRef<any>(null);
+  const loadedUserRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setAppError("Supabase is not configured yet. Add your project URL and publishable key to .env.local, then restart the app.");
+      setLoading(false);
+      return;
+    }
+
+    let active = true;
+    supabase.auth.getSession().then(({data, error}) => {
+      if (!active) return;
+      if (error) { setAppError(error.message); setLoading(false); return; }
+      setSession(data.session);
+      if (data.session) loadUser(data.session.user.id);
+      else setLoading(false);
+    });
+
+    const {data: listener} = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+      setMobileMenu(false);
+      if (s) {
+        if (loadedUserRef.current !== s.user.id) loadUser(s.user.id);
+      } else {
+        loadedUserRef.current = null;
+        if (channelRef.current) { supabase.removeChannel(channelRef.current); channelRef.current = null; }
+        setTasks([]); setCompletions([]); setProfile(null); setLoading(false);
+      }
+    });
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+      if (channelRef.current) supabase.removeChannel(channelRef.current);
+    };
+  }, []);
+
+  async function loadUser(uid: string) {
+    setLoading(true);
+    setAppError("");
+    const [{data: p, error: profileError}, {data: t, error: taskError}, {data: c, error: completionError}] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", uid).maybeSingle(),
+      supabase.from("tasks").select("*").eq("user_id", uid).order("created_at", {ascending:false}),
+      supabase.from("task_completions").select("*").eq("user_id", uid)
+    ]);
+
+    if (profileError || taskError || completionError) {
+      setAppError(profileError?.message || taskError?.message || completionError?.message || "Could not load your workspace.");
+    }
+    setProfile(p);
+    setTasks(t || []);
+    setCompletions(c || []);
+    setLoading(false);
+    loadedUserRef.current = uid;
+
+    if (channelRef.current) supabase.removeChannel(channelRef.current);
+    channelRef.current = supabase
+      .channel(`tasks-${uid}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: `user_id=eq.${uid}` }, (payload) => {
+        const row = (payload.new || payload.old) as Task;
+        if (payload.eventType === "INSERT") setTasks(prev => prev.some(t => t.id === row.id) ? prev : [row, ...prev]);
+        else if (payload.eventType === "UPDATE") setTasks(prev => prev.map(t => t.id === row.id ? row : t));
+        else if (payload.eventType === "DELETE") {
+          setTasks(prev => prev.filter(t => t.id !== row.id));
+          setCompletions(prev => prev.filter(c => c.task_id !== row.id));
+        }
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "task_completions", filter: `user_id=eq.${uid}` }, (payload) => {
+        const row = (payload.new || payload.old) as Completion;
+        if (payload.eventType === "DELETE") setCompletions(prev => prev.filter(c => c.id !== row.id));
+        else setCompletions(prev => [row, ...prev.filter(c => !(c.task_id === row.task_id && c.completion_date === row.completion_date))]);
+      })
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR") setAppError("Live updates are unavailable. Your tasks still work normally.");
+      });
+  }
+
+  async function signOut() {
+    const {error} = await supabase.auth.signOut();
+    if (error) setAppError(error.message);
+    else setMobileMenu(false);
+  }
+
+  // Tasks are recurring daily. Completion is stored separately for each calendar date.
+  const visibleTasks = useMemo(() => tasks.filter(t =>
+    (!search.trim() || t.title.toLowerCase().includes(search.toLowerCase()) ||
+     (t.notes || "").toLowerCase().includes(search.toLowerCase()))
+  ), [tasks, search]);
+
+  const dayCompletions = completions.filter(c => c.completion_date === selectedDate && c.completed);
+  const completedIds = new Set(dayCompletions.map(c => c.task_id));
+  const done = tasks.filter(t => completedIds.has(t.id)).length;
+  const total = tasks.length;
+  const progress = total ? Math.round(done / total * 100) : 0;
+
+  const lastSevenDays = Array.from({length: 7}, (_, index) => {
+    const d = new Date(selectedDate + "T12:00:00");
+    d.setDate(d.getDate() - (6 - index));
+    const key = dateKey(d);
+    const completedForDay = new Set(completions.filter(c => c.completion_date === key && c.completed).map(c => c.task_id));
+    const completedCount = tasks.filter(t => completedForDay.has(t.id)).length;
+    return { key, label: d.toLocaleDateString("en-US", {weekday:"short"}), percent: tasks.length ? Math.round(completedCount / tasks.length * 100) : 0, count: completedCount };
+  });
+
+  const monthLabel = new Date(selectedDate + "T12:00:00").toLocaleDateString("en-US", {
+    month:"long", year:"numeric"
+  });
+
+  async function toggleTask(task: Task) {
+    const currentlyDone = completions.some(c => c.task_id === task.id && c.completion_date === selectedDate && c.completed);
+    const next = !currentlyDone;
+    const {data: userData} = await supabase.auth.getUser();
+    const uid = userData.user?.id;
+    if (!uid) { setAppError("Please sign in to update a task."); return; }
+    const {data, error} = await supabase.from("task_completions").upsert({
+      task_id: task.id, user_id: uid, completion_date: selectedDate,
+      completed: next, completed_at: next ? new Date().toISOString() : null
+    }, {onConflict: "task_id,completion_date"}).select().single();
+    if (error) setAppError(error.message);
+    else if (data) setCompletions(prev => [data as Completion, ...prev.filter(c => !(c.task_id === task.id && c.completion_date === selectedDate))]);
+  }
+
+  async function deleteTask(id: string) {
+    if (!confirm("Delete this task?")) return;
+    const {error} = await supabase.from("tasks").delete().eq("id", id);
+    if (!error) setTasks(prev => prev.filter(t => t.id !== id));
+  }
+
+  function shiftDay(amount: number) {
+    const d = new Date(selectedDate + "T12:00:00");
+    d.setDate(d.getDate() + amount);
+    setSelectedDate(dateKey(d));
+  }
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brandMark">✓</div>
+          <div><strong>new~step</strong><span>to do list</span></div>
+        </div>
+        <button className="mobileBtn" onClick={() => setMobileMenu(v=>!v)}><Menu size={21}/></button>
+        <div className={`topActions ${mobileMenu ? "show" : ""}`}>
+          <div className="search"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search tasks..." /></div>
+          {session ? (
+            <div className="account">
+              <div className="avatar">{(profile?.full_name || session.user.email || "U").slice(0,1).toUpperCase()}</div>
+              <div className="accountText"><b>{profile?.full_name || "My account"}</b><small>{session.user.email}</small></div>
+              <button className="iconBtn" title="Sign out" onClick={signOut}><LogOut size={17}/></button>
+            </div>
+          ) : <button className="primary small" onClick={()=>{setMobileMenu(false); if (!isSupabaseConfigured) setAppError("Connect Supabase first — see README.md for the setup steps."); else {setAuthMode("login");setAuthOpen(true)}}}><LogIn size={17}/> Sign in</button>}
+        </div>
+      </header>
+
+      {appError && <div className="error appError">{appError}<button onClick={()=>setAppError("")} aria-label="Dismiss">×</button></div>}
+
+      <main className="container">
+        <section className="hero">
+          <div>
+            <p className="eyebrow">DAILY SYSTEM</p>
+            <h1>Turn your day into <span>progress.</span></h1>
+            <p className="sub">Create tasks, confirm what you actually completed, and let the day keep an honest record.</p>
+          </div>
+          <div className="heroStat"><span>{progress}%</span><small>{selectedDate === todayKey ? "today complete" : "day complete"}</small></div>
+        </section>
+
+        <section className="progressCard">
+          <div className="progressTop">
+            <div><span className="label">{selectedDate === todayKey ? "TODAY'S PROGRESS" : `${new Date(selectedDate+"T12:00:00").toLocaleDateString("en-US", {month:"short", day:"numeric"}).toUpperCase()} PROGRESS`}</span><b>{done} of {total} tasks completed</b></div>
+            <div className="ring" style={{"--p": `${progress}%`} as any}><strong>{progress}%</strong></div>
+          </div>
+          <div className="bar"><span style={{width:`${progress}%`}}/></div>
+          <div className="legend">
+            <span><i className="dot green"/> Completed</span>
+            <span><i className="dot blue"/> Pending</span>
+            <span><i className="dot red"/> Missed after day ends</span>
+          </div>
+        </section>
+
+        <section className="progressCard histogramCard">
+          <div className="progressTop"><div><span className="label">LAST 7 DAYS</span><b>Daily completion histogram</b></div><span className="histogramHint">Based on your daily check-offs</span></div>
+          <div className="histogram" role="img" aria-label="Task completion percentages for the last seven days">
+            {lastSevenDays.map(day => <div className="histogramDay" key={day.key} title={`${day.key}: ${day.percent}% completed`}>
+              <span className="histogramValue">{day.percent}%</span>
+              <div className="histogramTrack"><span className={day.percent === 100 ? "full" : day.percent > 0 ? "partial" : "emptyBar"} style={{height: `${Math.max(day.percent, 3)}%`}} /></div>
+              <span className="histogramLabel">{day.label}</span>
+            </div>)}
+          </div>
+        </section>
+
+        <section className="dateNav">
+          <button className="squareBtn" onClick={()=>shiftDay(-1)}><ChevronLeft size={19}/></button>
+          <div><CalendarDays size={19}/><b>{selectedDate === todayKey ? "Today" : new Date(selectedDate+"T12:00:00").toLocaleDateString("en-US",{weekday:"long"})}</b><span>{new Date(selectedDate+"T12:00:00").toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}</span></div>
+          <button className="squareBtn" onClick={()=>shiftDay(1)}><ChevronRight size={19}/></button>
+          <button className="todayBtn" onClick={()=>setSelectedDate(todayKey)}>Today</button>
+        </section>
+
+        <section className="workspace">
+          <div className="sectionHead">
+            <div><span className="label">{monthLabel.toUpperCase()}</span><h2>Your tasks</h2></div>
+            {session && <button className="primary" onClick={()=>{setEditing(null);setFormOpen(true)}}><Plus size={18}/> Add task</button>}
+          </div>
+
+          {!isSupabaseConfigured ? (
             <div className="empty loginEmpty">
               <div className="emptyIcon"><UserRound size={27}/></div>
               <h3>One setup step remains</h3>
