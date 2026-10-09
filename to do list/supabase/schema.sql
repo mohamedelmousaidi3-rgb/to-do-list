@@ -85,3 +85,12 @@ begin
   end if;
 end
 $$;
+
+-- Daily completion is separate from the recurring task itself.
+create table if not exists public.task_completions (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.tasks(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  completion_date date not null,
+  completed boolean not null default true,
+  completed_at timestamptz,
